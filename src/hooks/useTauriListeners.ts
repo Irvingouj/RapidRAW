@@ -438,6 +438,24 @@ export function useTauriListeners({
       listen('agent://image-loaded', () => {
         // intentionally a no-op for now; reserved for future opt-in navigation.
       }),
+      listen('agent://rating-updated', (event: any) => {
+        if (!isEffectActive) return;
+        const { path, rating } = event.payload ?? {};
+        if (!path || rating === undefined) return;
+        useLibraryStore.getState().setLibrary((state) => ({
+          imageRatings: { ...state.imageRatings, [path]: rating },
+          imageList: state.imageList.map((img) =>
+            img.path === path ? { ...img, rating } : img,
+          ),
+        }));
+      }),
+      listen('agent://color-label-updated', (event: any) => {
+        // Color labels live in tags with a prefix; library refresh is best-effort.
+        if (!isEffectActive) return;
+        const { path } = event.payload ?? {};
+        if (!path) return;
+        // Trigger a soft tag refresh is optional; rating path is the critical one.
+      }),
     ];
 
     return () => {

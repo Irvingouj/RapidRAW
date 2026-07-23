@@ -35,11 +35,32 @@ pub async fn generate_ai_foreground_mask(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<AiForegroundMaskParameters, String> {
+    generate_ai_foreground_mask_core(
+        js_adjustments,
+        rotation,
+        flip_horizontal,
+        flip_vertical,
+        orientation_steps,
+        &state,
+        app_handle,
+    )
+    .await
+}
+
+pub async fn generate_ai_foreground_mask_core(
+    js_adjustments: serde_json::Value,
+    rotation: f32,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    orientation_steps: u8,
+    state: &AppState,
+    app_handle: tauri::AppHandle,
+) -> Result<AiForegroundMaskParameters, String> {
     let models = get_or_init_ai_models(&app_handle, &state.ai_state, &state.ai_init_lock)
         .await
         .map_err(|e| e.to_string())?;
 
-    let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
+    let warped_image = get_cached_full_warped_image(state, &js_adjustments)?;
 
     let full_mask_image =
         run_u2netp_model(warped_image.as_ref(), &models.u2netp).map_err(|e| e.to_string())?;
@@ -64,11 +85,32 @@ pub async fn generate_ai_sky_mask(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<AiSkyMaskParameters, String> {
+    generate_ai_sky_mask_core(
+        js_adjustments,
+        rotation,
+        flip_horizontal,
+        flip_vertical,
+        orientation_steps,
+        &state,
+        app_handle,
+    )
+    .await
+}
+
+pub async fn generate_ai_sky_mask_core(
+    js_adjustments: serde_json::Value,
+    rotation: f32,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    orientation_steps: u8,
+    state: &AppState,
+    app_handle: tauri::AppHandle,
+) -> Result<AiSkyMaskParameters, String> {
     let models = get_or_init_ai_models(&app_handle, &state.ai_state, &state.ai_init_lock)
         .await
         .map_err(|e| e.to_string())?;
 
-    let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
+    let warped_image = get_cached_full_warped_image(state, &js_adjustments)?;
 
     let full_mask_image =
         run_sky_seg_model(warped_image.as_ref(), &models.sky_seg).map_err(|e| e.to_string())?;
@@ -187,6 +229,34 @@ pub async fn generate_ai_subject_mask(
     flip_vertical: bool,
     orientation_steps: u8,
     state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<AiSubjectMaskParameters, String> {
+    generate_ai_subject_mask_core(
+        js_adjustments,
+        path,
+        start_point,
+        end_point,
+        rotation,
+        flip_horizontal,
+        flip_vertical,
+        orientation_steps,
+        &state,
+        app_handle,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn generate_ai_subject_mask_core(
+    js_adjustments: serde_json::Value,
+    path: String,
+    start_point: (f64, f64),
+    end_point: (f64, f64),
+    rotation: f32,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    orientation_steps: u8,
+    state: &AppState,
     app_handle: tauri::AppHandle,
 ) -> Result<AiSubjectMaskParameters, String> {
     let models = get_or_init_ai_models(&app_handle, &state.ai_state, &state.ai_init_lock)

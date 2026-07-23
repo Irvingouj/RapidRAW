@@ -178,6 +178,34 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// Open the next image in the current folder filmstrip.
+    Next {
+        #[arg(long)]
+        wrap: bool,
+    },
+
+    /// Open the previous image in the current folder filmstrip.
+    Prev {
+        #[arg(long)]
+        wrap: bool,
+    },
+
+    /// Set star rating 0–5 on the current image (or --path).
+    Rate {
+        /// Stars 0–5.
+        rating: u8,
+        #[arg(long)]
+        path: Option<String>,
+    },
+
+    /// Set or clear a color label on the current image (or --path).
+    Label {
+        /// Color name, or "clear" / "none" to remove.
+        color: String,
+        #[arg(long)]
+        path: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -197,7 +225,7 @@ enum MaskCmd {
     /// only the type; geometric types (radial, linear, brush, color, luminance)
     /// take parameters via --json.
     Add {
-        /// Mask type, e.g. ai-sky, radial, linear, brush, color, luminance.
+        /// Mask type, e.g. ai-sky, radial, linear, brush, color, luminance, ai-subject.
         mask_type: String,
         #[command(flatten)]
         flags: AdjustmentsFlags,
@@ -209,6 +237,15 @@ enum MaskCmd {
         opacity: Option<f32>,
         #[arg(long)]
         invert: bool,
+        /// Sub-mask mode: additive | subtractive | intersect.
+        #[arg(long, default_value = "additive")]
+        mode: String,
+        /// For ai-subject: bounding box x1,y1,x2,y2 in image pixels.
+        #[arg(long, value_name = "x1,y1,x2,y2")]
+        r#box: Option<String>,
+        /// Skip server-side ONNX generation for ai-* types.
+        #[arg(long)]
+        skip_generate: bool,
     },
     /// Update a mask by id (patch fields via --json).
     Update {
@@ -312,18 +349,43 @@ async fn main() -> Result<()> {
         }
 
         Command::Mask(mask) => match mask {
-            MaskCmd::Add { mask_type, flags, json, name, opacity, invert } => {
+            MaskCmd::Add {
+                mask_type,
+                flags,
+                json,
+                name,
+                opacity,
+                invert,
+                mode,
+                r#box,
+                skip_generate,
+            } => {
                 let c = Client::discover().await?;
                 let patch = build_patch(flags, json)?;
-                let r = c
-                    .mask_add(
-                        &mask_type,
-                        patch,
-                        name.as_deref(),
-                        opacity,
-                        if invert { Some(true) } else { None },
-                    )
-                    .await?;
+                let mut body = serde_json::json!({
+                    "type": mask_type,
+                    "adjustments": patch,
+                    "mode": mode,
+                    "invert": invert,
+                    "skipGenerate": skip_generate,
+                });
+                if let Some(n) = name {
+                    body["name"] = serde_json::json!(n);
+                }
+                if let Some(o) = opacity {
+                    body["opacity"] = serde_json::json!(o);
+                }
+                if let Some(b) = r#box {
+                    let parts: Vec<f64> = b
+                        .split(',')
+                        .filter_map(|s| s.trim().parse().ok())
+                        .collect();
+                    if parts.len() != 4 {
+                        bail!("--box must be x1,y1,x2,y2");
+                    }
+                    body["box"] = serde_json::json!([parts[0], parts[1], parts[2], parts[3]]);
+                }
+                let r = c.mask_add_full(body).await?;
                 println!("{}", serde_json::to_string_pretty(&r)?);
                 Ok(())
             }
@@ -506,6 +568,45 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            Ok(())
+        }
+
+        Command::Next { wrap } => {
+            let c = Client::discover().await?;
+            let r = c.navigate("next", wrap).await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
+        }
+
+        Command::Prev { wrap } => {
+            let c = Client::discover().await?;
+            let r = c.navigate("prev", wrap).await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
+        }
+
+        Command::Rate { rating, path } => {
+            if rating > 5 {
+                bail!("rating must be 0–5");
+            }
+            let c = Client::discover().await?;
+            let paths = path.map(|p| vec![p]);
+            let r = c.set_rating(rating, paths).await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
+        }
+
+        Command::Label { color, path } => {
+            let c = Client::discover().await?;
+            let paths = path.map(|p| vec![p]);
+            let color_opt = match color.to_lowercase().as_str() {
+                "clear" | "none" | "" => None,
+                other => Some(other.to_string()),
+            };
+            let r = c
+                .set_color_label(color_opt.as_deref(), paths)
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
             Ok(())
         }
     }

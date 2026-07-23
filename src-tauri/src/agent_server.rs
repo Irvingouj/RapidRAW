@@ -63,6 +63,41 @@ impl AgentServerState {
             *m.0.lock().unwrap() = Some(value);
         }
     }
+
+    /// Current committed adjustments for preview/export.
+    /// Prefer the frontend mirror; if empty, load from the open image's sidecar.
+    fn current_adjustments(&self) -> Result<Value, String> {
+        if let Some(m) = self.mirror() {
+            if !m.is_null() {
+                if let Some(obj) = m.as_object() {
+                    if !obj.is_empty() {
+                        return Ok(m);
+                    }
+                } else {
+                    return Ok(m);
+                }
+            }
+        }
+        let path = self
+            .app_state()
+            .original_image
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|img| img.path.clone())
+            .ok_or_else(|| {
+                "no image loaded and no adjustments mirror — load an image first".to_string()
+            })?;
+        let (_, sidecar) = crate::file_management::parse_virtual_path(&path);
+        let meta = crate::exif_processing::load_sidecar(&sidecar);
+        if meta.adjustments.is_null() {
+            Ok(json!({}))
+        } else {
+            // Seed mirror so subsequent previews are fast / consistent.
+            self.set_mirror(meta.adjustments.clone());
+            Ok(meta.adjustments)
+        }
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -132,6 +167,9 @@ fn router(shared: Arc<AgentServerState>) -> Router {
         .route("/presets", get(presets_list))
         // library / filmstrip
         .route("/images", get(images_list))
+        .route("/navigate", post(navigate))
+        .route("/rating", post(set_rating))
+        .route("/color-label", post(set_color_label))
         .with_state(shared)
         // Loopback-only server, but enable a permissive CORS layer so that
         // browser-based dev tools / notebooks can also poke at it.
@@ -285,14 +323,15 @@ async fn preview(
     State(shared): State<Arc<AgentServerState>>,
     axum::Json(req): axum::Json<PreviewRequest>,
 ) -> Response {
-    let Some(adjustments) = shared.mirror() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({
-                "error": "no current adjustments in mirror — load an image and/or adjust first so the GUI syncs state"
-            })),
-        )
-            .into_response();
+    let adjustments = match shared.current_adjustments() {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({ "error": e })),
+            )
+                .into_response();
+        }
     };
     let app_state = shared.app_state();
     match enqueue_preview(
@@ -426,14 +465,15 @@ async fn export_image(
     State(shared): State<Arc<AgentServerState>>,
     axum::Json(req): axum::Json<ExportRequest>,
 ) -> Response {
-    let Some(adjustments) = shared.mirror() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({
-                "error": "no current adjustments in mirror — load an image and/or adjust first so the GUI syncs state"
-            })),
-        )
-            .into_response();
+    let adjustments = match shared.current_adjustments() {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({ "error": e })),
+            )
+                .into_response();
+        }
     };
     let app_state = shared.app_state();
     match enqueue_preview(
@@ -488,21 +528,147 @@ struct MaskAddRequest {
     opacity: Option<f32>,
     #[serde(default)]
     invert: Option<bool>,
-    /// Explicit sub-mask definitions for geometric masks. For AI masks this
-    /// can be omitted; the frontend's AI generation hook will populate the
-    /// bitmap when it processes the `ai-*` type.
+    /// Sub-mask mode: additive | subtractive | intersect.
+    #[serde(default)]
+    mode: Option<String>,
+    /// Explicit sub-mask definitions for geometric masks.
     #[serde(default)]
     sub_masks: Option<Vec<Value>>,
+    /// For `ai-subject`: bounding box [x1,y1,x2,y2] in image pixels.
+    #[serde(default, rename = "box")]
+    bbox: Option<[f64; 4]>,
+    /// Skip ONNX generation even for ai-* types (container only).
+    #[serde(default, rename = "skipGenerate")]
+    skip_generate: bool,
 }
 
-/// `POST /mask/add` — emit `agent://mask-added`; the frontend listener appends
-/// a container to `adjustments.masks` (driving the same render + autosave path).
-/// Returns the new mask id so the agent can later update or remove it.
+/// `POST /mask/add` — emit `agent://mask-added`; for `ai-*` types, generate the
+/// mask bitmap server-side when possible (sky/foreground/subject with --box).
 async fn mask_add(
     State(shared): State<Arc<AgentServerState>>,
     axum::Json(req): axum::Json<MaskAddRequest>,
 ) -> Response {
     let id = format!("agent-mask-{}", uuid::Uuid::new_v4());
+    let sub_id = format!("{id}-0");
+    let mode = req
+        .mode
+        .clone()
+        .unwrap_or_else(|| "additive".to_string());
+
+    let mut parameters = json!({});
+    let mut gen_error: Option<String> = None;
+
+    if !req.skip_generate {
+        let adj = shared.current_adjustments().unwrap_or_else(|_| json!({}));
+        let rotation = adj.get("rotation").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        let flip_h = adj
+            .get("flipHorizontal")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let flip_v = adj
+            .get("flipVertical")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let orient = adj
+            .get("orientationSteps")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u8;
+        let app_state = shared.app_state();
+
+        let gen_result = match req.mask_type.as_str() {
+            "ai-sky" => crate::ai_commands::generate_ai_sky_mask_core(
+                adj.clone(),
+                rotation,
+                flip_h,
+                flip_v,
+                orient,
+                &*app_state,
+                shared.app_handle.clone(),
+            )
+            .await
+            .map(|p| serde_json::to_value(p).unwrap_or(json!({}))),
+            "ai-foreground" => crate::ai_commands::generate_ai_foreground_mask_core(
+                adj.clone(),
+                rotation,
+                flip_h,
+                flip_v,
+                orient,
+                &*app_state,
+                shared.app_handle.clone(),
+            )
+            .await
+            .map(|p| serde_json::to_value(p).unwrap_or(json!({}))),
+            "ai-subject" => {
+                let box_pts = req.bbox.ok_or_else(|| {
+                    "ai-subject requires box: [x1,y1,x2,y2] in image pixels".to_string()
+                });
+                match box_pts {
+                    Ok([x1, y1, x2, y2]) => {
+                        let path = app_state
+                            .original_image
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .map(|i| i.path.clone())
+                            .unwrap_or_default();
+                        crate::ai_commands::generate_ai_subject_mask_core(
+                            adj.clone(),
+                            path,
+                            (x1, y1),
+                            (x2, y2),
+                            rotation,
+                            flip_h,
+                            flip_v,
+                            orient,
+                            &*app_state,
+                            shared.app_handle.clone(),
+                        )
+                        .await
+                        .map(|p| serde_json::to_value(p).unwrap_or(json!({})))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            _ => Ok(json!({})),
+        };
+
+        match gen_result {
+            Ok(p) if !p.as_object().map(|o| o.is_empty()).unwrap_or(true) => {
+                parameters = p;
+            }
+            Ok(_) => {}
+            Err(e) => gen_error = Some(e),
+        }
+    }
+
+    // Geometric helpers from sub_masks if provided; else default one submask.
+    let sub_masks = req.sub_masks.unwrap_or_else(|| {
+        vec![json!({
+            "id": sub_id,
+            "type": req.mask_type,
+            "mode": mode,
+            "visible": true,
+            "invert": false,
+            "opacity": 1.0,
+            "parameters": parameters,
+        })]
+    });
+
+    // If caller passed sub_masks without parameters but we generated AI params, merge into first.
+    let sub_masks = if gen_error.is_none()
+        && parameters.as_object().map(|o| !o.is_empty()).unwrap_or(false)
+    {
+        let mut sms = sub_masks;
+        if let Some(first) = sms.get_mut(0) {
+            if first.get("parameters").map(|p| p.is_null() || p.as_object().map(|o| o.is_empty()).unwrap_or(true)).unwrap_or(true) {
+                first["parameters"] = parameters.clone();
+            }
+        }
+        sms
+    } else {
+        sub_masks
+    };
+
     let payload = json!({
         "id": id,
         "type": req.mask_type,
@@ -510,14 +676,30 @@ async fn mask_add(
         "opacity": req.opacity.unwrap_or(1.0),
         "invert": req.invert.unwrap_or(false),
         "adjustments": req.adjustments,
-        "subMasks": req.sub_masks.unwrap_or_else(|| vec![
-            // default single sub-mask carrying the declared type
-            json!({ "id": format!("{id}-0"), "type": req.mask_type, "mode": "additive",
-                     "visible": true, "invert": false, "opacity": 1.0 })
-        ]),
+        "subMasks": sub_masks,
     });
     emit_event(&shared.app_handle, "agent://mask-added", &payload);
-    (StatusCode::OK, axum::Json(json!({ "maskId": id, "ok": true }))).into_response()
+
+    // Keep mirror masks in sync for bare preview.
+    if let Ok(mut cur) = shared.current_adjustments() {
+        let masks = cur
+            .get_mut("masks")
+            .and_then(|m| m.as_array_mut())
+            .cloned();
+        let mut list = masks.unwrap_or_default();
+        list.push(payload.clone());
+        if let Some(obj) = cur.as_object_mut() {
+            obj.insert("masks".into(), Value::Array(list));
+            shared.set_mirror(cur);
+        }
+    }
+
+    let mut resp = json!({ "maskId": id, "ok": true });
+    if let Some(e) = gen_error {
+        resp["generateError"] = json!(e);
+        resp["ok"] = json!(true); // container still added
+    }
+    (StatusCode::OK, axum::Json(resp)).into_response()
 }
 
 /// `POST /mask/:id` body — a partial patch merged into the matching container.
@@ -1027,7 +1209,268 @@ async fn images_list(
     }
 }
 
+// ---- navigate next/prev ----
 
+#[derive(Deserialize)]
+struct NavigateRequest {
+    /// "next" or "prev".
+    direction: String,
+    /// Wrap around ends of the list (default false).
+    #[serde(default)]
+    wrap: bool,
+}
+
+/// `POST /navigate {direction: next|prev, wrap?}` — filmstrip step + load + GUI nav.
+async fn navigate(
+    State(shared): State<Arc<AgentServerState>>,
+    axum::Json(req): axum::Json<NavigateRequest>,
+) -> Response {
+    let dir_key = req.direction.to_lowercase();
+    if dir_key != "next" && dir_key != "prev" {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": "direction must be next or prev" })),
+        )
+            .into_response();
+    }
+
+    let current = match shared
+        .app_state()
+        .original_image
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|img| img.path.clone())
+    {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({ "error": "no image loaded" })),
+            )
+                .into_response();
+        }
+    };
+
+    let (source, _) = crate::file_management::parse_virtual_path(&current);
+    let parent = match source.parent() {
+        Some(p) => p.to_string_lossy().into_owned(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({ "error": "cannot resolve folder" })),
+            )
+                .into_response();
+        }
+    };
+
+    let images = match crate::file_management::list_images_in_dir(
+        parent.clone(),
+        shared.app_handle.clone(),
+    ) {
+        Ok(i) => i,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
+
+    if images.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": "folder has no images" })),
+        )
+            .into_response();
+    }
+
+    let paths: Vec<String> = images
+        .iter()
+        .filter_map(|img| serde_json::to_value(img).ok())
+        .filter_map(|v| v.get("path").and_then(|p| p.as_str()).map(|s| s.to_string()))
+        .collect();
+
+    let (cur_src, _) = crate::file_management::parse_virtual_path(&current);
+    let cur_src = cur_src.to_string_lossy().into_owned();
+    let idx = paths
+        .iter()
+        .position(|p| p == &current || p == &cur_src)
+        .unwrap_or(0);
+
+    let n = paths.len();
+    let next_idx = if dir_key == "next" {
+        if idx + 1 < n {
+            idx + 1
+        } else if req.wrap {
+            0
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({ "error": "already at last image", "index": idx, "count": n })),
+            )
+                .into_response();
+        }
+    } else if idx > 0 {
+        idx - 1
+    } else if req.wrap {
+        n - 1
+    } else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": "already at first image", "index": idx, "count": n })),
+        )
+            .into_response();
+    };
+
+    let next_path = paths[next_idx].clone();
+    let app_state = shared.app_state();
+    match crate::image_loader::load_image_core(&app_state, &shared.app_handle, next_path.clone())
+        .await
+    {
+        Ok(r) => {
+            emit_event(
+                &shared.app_handle,
+                "agent://navigate-to-image",
+                &json!({ "path": next_path }),
+            );
+            // Clear mirror so preview falls back to sidecar of the new image until GUI syncs.
+            shared.set_mirror(json!({}));
+            let _ = shared.current_adjustments(); // seed from sidecar if any
+            (
+                StatusCode::OK,
+                axum::Json(json!({
+                    "path": next_path,
+                    "index": next_idx,
+                    "count": n,
+                    "dir": parent,
+                    "width": r.width,
+                    "height": r.height,
+                    "isRaw": r.is_raw,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+// ---- rating / color label ----
+
+#[derive(Deserialize)]
+struct RatingRequest {
+    /// 0–5 stars.
+    rating: u8,
+    /// Paths to rate. If empty/omitted, uses currently loaded image.
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+/// `POST /rating {rating, paths?}` — set star rating (0–5).
+async fn set_rating(
+    State(shared): State<Arc<AgentServerState>>,
+    axum::Json(req): axum::Json<RatingRequest>,
+) -> Response {
+    if req.rating > 5 {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": "rating must be 0–5" })),
+        )
+            .into_response();
+    }
+    let paths = if req.paths.is_empty() {
+        match shared
+            .app_state()
+            .original_image
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|i| i.path.clone())
+        {
+            Some(p) => vec![p],
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": "no paths and no image loaded" })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        req.paths
+    };
+    let r = crate::file_management::set_rating_for_paths(
+        paths.clone(),
+        req.rating,
+        shared.app_handle.clone(),
+    );
+    // Notify frontend library store if it listens to rating events via thumbnail path;
+    // also emit a dedicated agent event for live star UI.
+    for p in &paths {
+        emit_event(
+            &shared.app_handle,
+            "agent://rating-updated",
+            &json!({ "path": p, "rating": req.rating }),
+        );
+    }
+    json_result(r.map(|_| json!({ "ok": true, "paths": paths, "rating": req.rating })))
+}
+
+#[derive(Deserialize)]
+struct ColorLabelRequest {
+    /// Color name or null/empty to clear.
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+/// `POST /color-label {color?, paths?}` — set/clear color label.
+async fn set_color_label(
+    State(shared): State<Arc<AgentServerState>>,
+    axum::Json(req): axum::Json<ColorLabelRequest>,
+) -> Response {
+    let paths = if req.paths.is_empty() {
+        match shared
+            .app_state()
+            .original_image
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|i| i.path.clone())
+        {
+            Some(p) => vec![p],
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": "no paths and no image loaded" })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        req.paths
+    };
+    let color = req.color.filter(|c| !c.is_empty());
+    let r = crate::file_management::set_color_label_for_paths(
+        paths.clone(),
+        color.clone(),
+        shared.app_handle.clone(),
+    );
+    for p in &paths {
+        emit_event(
+            &shared.app_handle,
+            "agent://color-label-updated",
+            &json!({ "path": p, "color": color }),
+        );
+    }
+    json_result(r.map(|_| json!({ "ok": true, "paths": paths, "color": color })))
+}
 
 /// Pack and send a `PreviewJob` to the worker, awaiting the rendered bytes.
 ///

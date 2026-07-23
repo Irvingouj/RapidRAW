@@ -422,6 +422,42 @@ impl Client {
             _ => self.get("/images").await,
         }
     }
+
+    pub async fn navigate(&self, direction: &str, wrap: bool) -> Result<serde_json::Value> {
+        self.post_json(
+            "/navigate",
+            &serde_json::json!({ "direction": direction, "wrap": wrap }),
+        )
+        .await
+    }
+
+    pub async fn set_rating(
+        &self,
+        rating: u8,
+        paths: Option<Vec<String>>,
+    ) -> Result<serde_json::Value> {
+        let mut body = serde_json::json!({ "rating": rating });
+        if let Some(p) = paths {
+            body["paths"] = serde_json::json!(p);
+        }
+        self.post_json("/rating", &body).await
+    }
+
+    pub async fn set_color_label(
+        &self,
+        color: Option<&str>,
+        paths: Option<Vec<String>>,
+    ) -> Result<serde_json::Value> {
+        let mut body = serde_json::json!({ "color": color });
+        if let Some(p) = paths {
+            body["paths"] = serde_json::json!(p);
+        }
+        self.post_json("/color-label", &body).await
+    }
+
+    pub async fn mask_add_full(&self, body: serde_json::Value) -> Result<serde_json::Value> {
+        self.post_json("/mask/add", &body).await
+    }
 }
 
 /// Minimal query-escape for paths (encode non-unreserved chars).
