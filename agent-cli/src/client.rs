@@ -411,6 +411,31 @@ impl Client {
     pub async fn presets(&self) -> Result<serde_json::Value> {
         self.get("/presets").await
     }
+
+    /// List images in a folder (or current image's folder if `dir` is None).
+    pub async fn images(&self, dir: Option<&str>) -> Result<serde_json::Value> {
+        match dir {
+            Some(d) if !d.is_empty() => {
+                let q = urlencoding_path(d);
+                self.get(&format!("/images?dir={q}")).await
+            }
+            _ => self.get("/images").await,
+        }
+    }
+}
+
+/// Minimal query-escape for paths (encode non-unreserved chars).
+fn urlencoding_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

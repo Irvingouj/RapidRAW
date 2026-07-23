@@ -168,6 +168,16 @@ enum Command {
 
     /// List saved user presets.
     Presets,
+
+    /// List images in a folder (filmstrip source). Default: folder of current image.
+    #[command(visible_alias = "list")]
+    Ls {
+        /// Directory to list. Omit to use the currently loaded image's folder.
+        dir: Option<String>,
+        /// Print full JSON instead of a compact path list.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -472,6 +482,30 @@ async fn main() -> Result<()> {
             let c = Client::discover().await?;
             let r = c.presets().await?;
             println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
+        }
+
+        Command::Ls { dir, json } => {
+            let c = Client::discover().await?;
+            let r = c.images(dir.as_deref()).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            } else {
+                let dir_s = r["dir"].as_str().unwrap_or("?");
+                let count = r["count"].as_u64().unwrap_or(0);
+                let cur_idx = r["currentIndex"].as_u64();
+                println!("# dir={dir_s}  count={count}  currentIndex={cur_idx:?}");
+                if let Some(arr) = r["images"].as_array() {
+                    for (i, img) in arr.iter().enumerate() {
+                        let path = img["path"].as_str().unwrap_or("?");
+                        let rating = img["rating"].as_u64().unwrap_or(0);
+                        let edited = img["is_edited"].as_bool().unwrap_or(false);
+                        let mark = if cur_idx == Some(i as u64) { ">" } else { " " };
+                        let edit = if edited { "*" } else { " " };
+                        println!("{mark}{i:4}  ★{rating} {edit}  {path}");
+                    }
+                }
+            }
             Ok(())
         }
     }

@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use axum::{
     Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -130,6 +130,8 @@ fn router(shared: Arc<AgentServerState>) -> Router {
         .route("/lens/autodetect", post(lens_autodetect))
         .route("/luts", get(luts_list))
         .route("/presets", get(presets_list))
+        // library / filmstrip
+        .route("/images", get(images_list))
         .with_state(shared)
         // Loopback-only server, but enable a permissive CORS layer so that
         // browser-based dev tools / notebooks can also poke at it.
@@ -918,6 +920,111 @@ async fn presets_list(State(shared): State<Arc<AgentServerState>>) -> Response {
         crate::file_management::load_presets(shared.app_handle.clone())
             .map(|p| json!({ "presets": p })),
     )
+}
+
+// ---- library / filmstrip list ----
+
+#[derive(Deserialize, Default)]
+struct ImagesListQuery {
+    /// Directory to list. If omitted, uses the parent of the currently loaded
+    /// image (`AppState.original_image` path).
+    #[serde(default)]
+    dir: Option<String>,
+}
+
+/// `GET /images?dir=...` — list supported images in a folder (filmstrip source).
+///
+/// Wraps `list_images_in_dir`. Without `dir`, lists the folder of the image
+/// currently loaded in the backend (same folder the human's filmstrip shows
+/// when that image is open).
+async fn images_list(
+    State(shared): State<Arc<AgentServerState>>,
+    Query(q): Query<ImagesListQuery>,
+) -> Response {
+    let dir = match q.dir {
+        Some(d) if !d.is_empty() => d,
+        _ => {
+            let app_state = shared.app_state();
+            let path = app_state
+                .original_image
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|img| img.path.clone());
+            match path {
+                Some(p) => {
+                    let (source, _) = crate::file_management::parse_virtual_path(&p);
+                    match source.parent() {
+                        Some(parent) => parent.to_string_lossy().into_owned(),
+                        None => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                axum::Json(json!({
+                                    "error": format!("cannot resolve parent directory of {p}")
+                                })),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({
+                            "error": "no image loaded and no ?dir= given — open an image or pass dir"
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
+
+    let result = crate::file_management::list_images_in_dir(dir.clone(), shared.app_handle.clone());
+    match result {
+        Ok(images) => {
+            let current = shared
+                .app_state()
+                .original_image
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|img| img.path.clone());
+
+            let images_json: Vec<Value> = images
+                .iter()
+                .filter_map(|img| serde_json::to_value(img).ok())
+                .collect();
+
+            let current_index = current.as_ref().and_then(|cur| {
+                let (cur_src, _) = crate::file_management::parse_virtual_path(cur);
+                let cur_src = cur_src.to_string_lossy().into_owned();
+                images_json.iter().position(|v| {
+                    v.get("path")
+                        .and_then(|p| p.as_str())
+                        .map(|p| p == cur.as_str() || p == cur_src)
+                        .unwrap_or(false)
+                })
+            });
+
+            (
+                StatusCode::OK,
+                axum::Json(json!({
+                    "dir": dir,
+                    "count": images_json.len(),
+                    "currentPath": current,
+                    "currentIndex": current_index,
+                    "images": images_json,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
 }
 
 
