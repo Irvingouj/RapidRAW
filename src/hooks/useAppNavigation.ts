@@ -1,7 +1,8 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { homeDir } from '@tauri-apps/api/path';
+import { listen } from '@tauri-apps/api/event';
 import { toast } from 'react-toastify';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { useEditorStore } from '../store/useEditorStore';
@@ -593,6 +594,21 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
       useLibraryStore.getState().setLibrary({ isTreeLoading: false });
     });
   };
+
+  // Agent control server: when the agent loads an image, navigate the GUI to
+  // it so human and agent work side-by-side on the same image. This reuses the
+  // full selection flow (cache, EXIF, history, render) so the GUI is in the
+  // exact same state as if the user had clicked the image themselves.
+  useEffect(() => {
+    const unlisten = listen<{ path: string }>('agent://navigate-to-image', (event) => {
+      const path = event.payload?.path;
+      if (!path) return;
+      handleImageSelect(path);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [handleImageSelect]);
 
   return {
     handleGoHome,

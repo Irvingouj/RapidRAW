@@ -1,11 +1,41 @@
 import { useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { Status } from '../components/ui/ExportImportProperties';
 import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
 import { useLibraryStore } from '../store/useLibraryStore';
+import { Adjustments } from '../utils/adjustments';
+
+/**
+ * Deep-merge an agent's partial adjustments patch onto the current store value.
+ * Arrays (masks, aiPatches, curves) are *replaced* not concatenated, so the
+ * agent has full control when it sends them, but scalar/nested-object fields
+ * can be patched individually (e.g. `{ exposure: 0.5 }` won't wipe masks).
+ */
+function mergeAdjustments(base: Adjustments, patch: any): Adjustments {
+  if (!patch || typeof patch !== 'object') return base;
+  const out: any = { ...base };
+  for (const key of Object.keys(patch)) {
+    const pv = (patch as any)[key];
+    const bv = (out as any)[key];
+    if (
+      pv && typeof pv === 'object' && !Array.isArray(pv) &&
+      bv && typeof bv === 'object' && !Array.isArray(bv)
+    ) {
+      (out as any)[key] = mergeAdjustments(bv, pv);
+    } else {
+      (out as any)[key] = pv;
+    }
+  }
+  return out as Adjustments;
+}
+
+/** Generate a UUID-like id for new agent-created mask containers. */
+function agentMaskId() {
+  return `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 interface TauriListenerProps {
   refreshAllFolderTrees: () => void;
@@ -346,6 +376,67 @@ export function useTauriListeners({
             cullingModalState: { ...state.cullingModalState, progress: null, error: String(event.payload) },
           }));
         }
+      }),
+
+      // ---- Agent control server events (see agent_server.rs) ----
+      // The agent drives the same Zustand store the UI uses, so human and
+      // agent share one source of truth and see each other's edits live.
+      listen('agent://adjustments-apply', (event: any) => {
+        if (!isEffectActive) return;
+        const store = useEditorStore.getState();
+        if (!store.selectedImage?.isReady) return; // nothing to apply to
+        const merged = mergeAdjustments(store.adjustments, event.payload);
+        // Replacing `adjustments` triggers the existing render + autosave effect.
+        store.setEditor({ adjustments: merged });
+        // Eagerly sync the agent mirror so /state reflects the change without
+        // waiting on the render effect's debounced push.
+        invoke('update_agent_state', { adjustments: merged }).catch(() => {});
+      }),
+      listen('agent://mask-added', (event: any) => {
+        if (!isEffectActive) return;
+        const store = useEditorStore.getState();
+        const container = {
+          id: event.payload?.id ?? agentMaskId(),
+          name: event.payload?.name ?? 'Agent mask',
+          visible: event.payload?.visible ?? true,
+          invert: event.payload?.invert ?? false,
+          opacity: event.payload?.opacity ?? 1,
+          adjustments: event.payload?.adjustments ?? {},
+          subMasks: event.payload?.subMasks ?? [],
+        };
+        const prev = store.adjustments.masks ?? [];
+        const merged = { ...store.adjustments, masks: [...prev, container] } as Adjustments;
+        store.setEditor({ adjustments: merged });
+        invoke('update_agent_state', { adjustments: merged }).catch(() => {});
+      }),
+      listen('agent://mask-updated', (event: any) => {
+        if (!isEffectActive) return;
+        const { id, patch } = event.payload ?? {};
+        if (!id) return;
+        const store = useEditorStore.getState();
+        const masks = (store.adjustments.masks ?? []).map((m: any) =>
+          m.id === id ? { ...m, ...(patch ?? {}) } : m,
+        );
+        const merged = { ...store.adjustments, masks } as Adjustments;
+        store.setEditor({ adjustments: merged });
+        invoke('update_agent_state', { adjustments: merged }).catch(() => {});
+      }),
+      listen('agent://mask-removed', (event: any) => {
+        if (!isEffectActive) return;
+        const { id } = event.payload ?? {};
+        if (!id) return;
+        const store = useEditorStore.getState();
+        const masks = (store.adjustments.masks ?? []).filter((m: any) => m.id !== id);
+        const merged = { ...store.adjustments, masks } as Adjustments;
+        store.setEditor({ adjustments: merged });
+        invoke('update_agent_state', { adjustments: merged }).catch(() => {});
+      }),
+      // An agent may load an image the human hasn't navigated to. We don't
+      // force-navigate (that would hijack the UI); we just mark it so a
+      // subsequent /adjust has a target if the human happens to be elsewhere.
+      // Full navigation can be added later behind an explicit opt-in flag.
+      listen('agent://image-loaded', () => {
+        // intentionally a no-op for now; reserved for future opt-in navigation.
       }),
     ];
 

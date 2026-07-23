@@ -75,6 +75,11 @@ pub struct PreviewJob {
     pub roi: Option<(f32, f32, f32, f32)>,
     pub compute_waveform: bool,
     pub active_waveform_channel: Option<String>,
+    /// When true, force an offscreen JPEG encode even if the GUI setting would
+    /// otherwise render straight to the WGPU screen surface (in which case the
+    /// worker returns the `WGPU_RENDER` sentinel instead of bytes). The agent
+    /// control server sets this so `/preview` always returns real image bytes.
+    pub force_offscreen: bool,
     pub responder: tokio::sync::oneshot::Sender<Vec<u8>>,
 }
 

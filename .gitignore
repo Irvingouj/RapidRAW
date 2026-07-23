@@ -41,3 +41,8 @@ src-tauri/libs/
 
 # bench/replay.js result dumps
 bench/out/
+# agent tooling / local only
+.pi/
+*.rrdata
+*.pyc
+__pycache__/

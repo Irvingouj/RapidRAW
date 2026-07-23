@@ -750,6 +750,18 @@ pub async fn load_image(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<LoadImageResult, String> {
+    // Delegate to the plain core function so the agent control server can
+    // reuse the exact same load path without going through IPC.
+    load_image_core(&state, &app_handle, path).await
+}
+
+/// Plain (non-Tauri) load entry point. Shared by the `load_image` command and
+/// the agent control server's `POST /load` route.
+pub async fn load_image_core(
+    state: &AppState,
+    app_handle: &tauri::AppHandle,
+    path: String,
+) -> Result<LoadImageResult, String> {
     let my_generation = state.load_image_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let generation_tracker = state.load_image_generation.clone();
     let cancel_token = Some((generation_tracker.clone(), my_generation));

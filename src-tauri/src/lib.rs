@@ -9,6 +9,7 @@ mod adjustment_utils;
 mod ai_commands;
 mod ai_connector;
 mod ai_processing;
+mod agent_server;
 mod android_integration;
 mod app_settings;
 mod app_state;
@@ -321,6 +322,7 @@ fn process_preview_job(
     roi: Option<(f32, f32, f32, f32)>,
     compute_waveform: bool,
     active_waveform_channel: Option<&str>,
+    force_offscreen: bool,
 ) -> Result<Vec<u8>, String> {
     let fn_start = std::time::Instant::now();
     let context = get_or_init_gpu_context(&state, app_handle)?;
@@ -340,8 +342,10 @@ fn process_preview_job(
 
     let default_preview_dim = settings.editor_preview_resolution.unwrap_or(1920);
     let preview_dim = target_resolution.unwrap_or(default_preview_dim);
+    // The agent control server can force offscreen JPEG encoding; otherwise we
+    // respect the user's GUI setting (render-to-WGPU-surface on macOS).
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    let use_wgpu_renderer = settings.use_wgpu_renderer.unwrap_or(true);
+    let use_wgpu_renderer = !force_offscreen && settings.use_wgpu_renderer.unwrap_or(true);
     #[cfg(any(target_os = "linux", target_os = "android"))]
     let use_wgpu_renderer = false;
 
@@ -655,6 +659,7 @@ fn start_preview_worker(app_handle: tauri::AppHandle) {
                 job.roi,
                 job.compute_waveform,
                 job.active_waveform_channel.as_deref(),
+                job.force_offscreen,
             ) {
                 Ok(bytes) => {
                     let _ = responder.send(bytes);
@@ -689,6 +694,7 @@ async fn apply_adjustments(
                 roi,
                 compute_waveform,
                 active_waveform_channel,
+                force_offscreen: false,
                 responder: tx,
             };
             worker_tx
@@ -703,6 +709,17 @@ async fn apply_adjustments(
         Ok(bytes) => Ok(Response::new(bytes)),
         Err(_) => Err("Superseded or worker failed".to_string()),
     }
+}
+
+/// Frontend-facing command: push the current `adjustments` store value into the
+/// agent control server's mirror so `GET /state` always reflects the live
+/// merged human+agent view. Called from the frontend whenever adjustments change.
+#[tauri::command]
+fn update_agent_state(
+    adjustments: serde_json::Value,
+    app_handle: tauri::AppHandle,
+) {
+    agent_server::update_state_mirror(&app_handle, adjustments);
 }
 
 #[tauri::command]
@@ -2101,6 +2118,17 @@ pub fn run() {
             file_management::start_metadata_workers(app_handle.clone());
             jxl_oxide::integration::register_image_decoding_hook();
 
+            // Spawn the localhost agent control server (see agent_server.rs).
+            // Best-effort: a failure to start must not break the app.
+            {
+                let ah = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = agent_server::start(ah).await {
+                        log::error!("agent_server failed to start: {e}");
+                    }
+                });
+            }
+
             let window_cfg = app.config().app.windows.first().unwrap().clone();
             let decorations = settings.decorations.unwrap_or(window_cfg.decorations);
             #[cfg(target_os = "android")]
@@ -2295,8 +2323,10 @@ pub fn run() {
             thumbnail_manager: ThumbnailManager::new(),
             metadata_manager: MetadataManager::new(),
         })
+        .manage(agent_server::AgentStateMirror::default())
         .invoke_handler(tauri::generate_handler![
             apply_adjustments,
+            update_agent_state,
             generate_preview_for_path,
             generate_original_transformed_preview,
             generate_preset_preview,

@@ -434,6 +434,12 @@ export function useImageProcessing(
 
         debouncedSave(selectedImage.path, adjustments);
 
+        // Keep the agent control server's /state mirror in sync with the live
+        // store so an AI agent can read the merged human+agent adjustments.
+        invoke('update_agent_state', { adjustments }).catch((err) =>
+          console.error('Failed to sync agent state:', err),
+        );
+
         const otherPaths = multiSelectedPaths.filter((p) => p !== selectedImage.path);
         if (appSettings?.copyPasteSettings?.autoSync && otherPaths.length > 0) {
           const prev = prevAdjustmentsRef.current;
