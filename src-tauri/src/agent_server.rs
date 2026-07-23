@@ -106,6 +106,7 @@ pub async fn start(app_handle: AppHandle) -> Result<SocketAddr, String> {
 /// Build the router. Pure (no I/O) so it can be exercised in isolation.
 fn router(shared: Arc<AgentServerState>) -> Router {
     Router::new()
+        // core
         .route("/health", get(health))
         .route("/load", post(load))
         .route("/preview", post(preview))
@@ -113,8 +114,22 @@ fn router(shared: Arc<AgentServerState>) -> Router {
         .route("/state", get(state))
         .route("/schema", get(schema))
         .route("/export", post(export_image))
+        // masks
         .route("/mask/add", post(mask_add))
         .route("/mask/:id", post(mask_update).delete(mask_remove))
+        // pipeline tools
+        .route("/denoise", post(denoise))
+        .route("/hdr/merge", post(hdr_merge))
+        .route("/panorama/stitch", post(panorama_stitch))
+        .route("/negative/convert", post(negative_convert))
+        .route("/cull", post(cull))
+        .route("/inpaint", post(inpaint))
+        // metadata / lookup
+        .route("/auto-adjust", get(auto_adjust))
+        .route("/lens/makers", get(lens_makers))
+        .route("/lens/autodetect", post(lens_autodetect))
+        .route("/luts", get(luts_list))
+        .route("/presets", get(presets_list))
         .with_state(shared)
         // Loopback-only server, but enable a permissive CORS layer so that
         // browser-based dev tools / notebooks can also poke at it.
@@ -602,7 +617,303 @@ fn merge_json(mut base: Value, patch: Value) -> Value {
     }
 }
 
-// ----------------------------------------------------------------------------
+// ============================================================================
+// Pipeline tool routes (denoise / hdr / panorama / negative / cull / inpaint)
+// and metadata lookups (auto-adjust / lens / luts / presets).
+//
+// These wrap existing Tauri commands. The async commands that take only
+// `AppHandle` (cull, negative-convert, list_luts, load_presets) are called
+// directly. The ones taking `tauri::State<AppState>` are reached via plain
+// `_core(&AppState, …)` variants we extracted next to their command.
+// ============================================================================
+
+/// Helper: run a fallible operation (returning `Result<T, String>`, the
+/// native error type of the wrapped Tauri commands) and turn it into a JSON
+/// Response.
+fn json_result<T: Serialize>(result: Result<T, String>) -> Response {
+    match result {
+        Ok(v) => (StatusCode::OK, axum::Json(json!(v))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+// ---- denoise ----
+
+#[derive(Deserialize)]
+struct DenoiseRequest {
+    path: String,
+    intensity: f32,
+    /// "ai" or "bm3d".
+    method: String,
+}
+
+/// `POST /denoise` — AI/BM3D denoise of a single image, saved next to it as
+/// `*_Denoised.tiff`/`.png`. Returns the output path.
+///
+/// Wraps `batch_denoise_images` (one path) — the heavy ML pipeline, distinct
+/// from the light `lumaNoiseReduction`/`colorNoiseReduction` sliders.
+async fn denoise(
+    State(shared): State<Arc<AgentServerState>>,
+    axum::Json(req): axum::Json<DenoiseRequest>,
+) -> Response {
+    let app_state = shared.app_state();
+    let r = crate::denoising::batch_denoise_images_core(
+        vec![req.path],
+        req.intensity,
+        req.method,
+        shared.app_handle.clone(),
+        &*app_state,
+    )
+    .await;
+    json_result(r.map(|paths| json!({ "outputs": paths })))
+}
+
+// ---- hdr merge ----
+
+#[derive(Deserialize)]
+struct HdrRequest {
+    paths: Vec<String>,
+}
+
+/// `POST /hdr/merge {paths}` — merge bracketed exposures, save the HDR result.
+async fn hdr_merge(
+    State(shared): State<Arc<AgentServerState>>,
+    axum::Json(req): axum::Json<HdrRequest>,
+) -> Response {
+    let app_state = shared.app_state();
+    if req.paths.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": "paths must be non-empty" })),
+        )
+            .into_response();
+    }
+    let first = req.paths[0].clone();
+    let merge =
+        crate::merge_hdr_core(req.paths, shared.app_handle.clone(), &*app_state).await;
+    let result = match merge {
+        Ok(()) => {
+            let app_state2 = shared.app_state();
+            crate::save_hdr_core(first, &*app_state2)
+                .await
+                .map(|p| json!({ "output": p }))
+        }
+        Err(e) => Err(e),
+    };
+    json_result(result)
+}
+
+// ---- panorama stitch ----
+
+#[derive(Deserialize)]
+struct PanoramaRequest {
+    paths: Vec<String>,
+}
+
+/// `POST /panorama/stitch {paths}` — stitch overlapping images, save the pano.
+async fn panorama_stitch(
+    State(shared): State<Arc<AgentServerState>>,
+    axum::Json(req): axum::Json<PanoramaRequest>,
+) -> Response {
+    let app_state = shared.app_state();
+    if req.paths.len() < 2 {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": "panorama needs >= 2 paths" })),
+        )
+            .into_response();
+    }
+    let first = req.paths[0].clone();
+    let stitch = crate::panorama_stitching::stitch_panorama_core(
+        req.paths,
+        shared.app_handle.clone(),
+        &*app_state,
+    )
+    .await;
+    let result = match stitch {
+        Ok(()) => {
+            let app_state2 = shared.app_state();
+            crate::panorama_stitching::save_panorama_core(first, &*app_state2)
+                .await
+                .map(|p| json!({ "output": p }))
+        }
+        Err(e) => Err(e),
+    };
+    json_result(result)
+}
+
+// ---- negative conversion ----
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NegativeConvertRequest {
+    paths: Vec<String>,
+    #[serde(default = "default_red_weight")]
+    red_weight: f32,
+    #[serde(default = "default_green_weight")]
+    green_weight: f32,
+    #[serde(default = "default_blue_weight")]
+    blue_weight: f32,
+    #[serde(default)]
+    exposure: f32,
+    #[serde(default = "default_neg_contrast")]
+    contrast: f32,
+}
+fn default_red_weight() -> f32 { 0.4 }
+fn default_green_weight() -> f32 { 0.3 }
+fn default_blue_weight() -> f32 { 0.3 }
+fn default_neg_contrast() -> f32 { 1.0 }
+
+/// `POST /negative/convert` — invert film scans with RGB channel weights.
+async fn negative_convert(
+    State(shared): State<Arc<AgentServerState>>,
+    axum::Json(req): axum::Json<NegativeConvertRequest>,
+) -> Response {
+    use crate::negative_conversion::{convert_negatives, NegativeConversionParams};
+    let params = NegativeConversionParams {
+        red_weight: req.red_weight,
+        green_weight: req.green_weight,
+        blue_weight: req.blue_weight,
+        exposure: req.exposure,
+        contrast: req.contrast,
+    };
+    let r = convert_negatives(req.paths, params, shared.app_handle.clone()).await;
+    json_result(r.map(|paths| json!({ "outputs": paths })))
+}
+
+// ---- culling ----
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct CullRequest {
+    paths: Vec<String>,
+    similarity_threshold: u32,
+    blur_threshold: f64,
+    group_similar: bool,
+    filter_blurry: bool,
+}
+
+/// `POST /cull {paths, ...}` — analyze a batch for sharpness/exposure/similarity.
+async fn cull(
+    State(shared): State<Arc<AgentServerState>>,
+    axum::Json(req): axum::Json<CullRequest>,
+) -> Response {
+    use crate::culling::{cull_images, CullingSettings};
+    let settings = CullingSettings {
+        similarity_threshold: req.similarity_threshold,
+        blur_threshold: req.blur_threshold,
+        group_similar: req.group_similar,
+        filter_blurry: req.filter_blurry,
+    };
+    let r = cull_images(req.paths, settings, shared.app_handle.clone()).await;
+    json_result(r)
+}
+
+// ---- inpainting ----
+
+#[derive(Deserialize)]
+struct InpaintRequest {
+    path: String,
+    patch_definition: Value,
+    #[serde(default)]
+    current_adjustments: Value,
+    #[serde(default)]
+    use_fast_inpaint: bool,
+}
+
+/// `POST /inpaint` — generative replace / manual cleanup of a masked region.
+/// Returns base64 patch data. Requires the AI connector server or local LAMA.
+async fn inpaint(
+    State(shared): State<Arc<AgentServerState>>,
+    axum::Json(req): axum::Json<InpaintRequest>,
+) -> Response {
+    use crate::inpainting::invoke_generative_replace_with_mask_def_core;
+    let patch_def: crate::mask_generation::AiPatchDefinition =
+        match serde_json::from_value(req.patch_definition) {
+            Ok(p) => p,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": format!("invalid patch_definition: {e}") })),
+                )
+                    .into_response();
+            }
+        };
+    let app_state = shared.app_state();
+    let r = invoke_generative_replace_with_mask_def_core(
+        req.path,
+        patch_def,
+        req.current_adjustments,
+        req.use_fast_inpaint,
+        None,
+        shared.app_handle.clone(),
+        &*app_state,
+    )
+    .await;
+    json_result(r.map(|b64| json!({ "patch": b64 })))
+}
+
+// ---- auto-adjust (replaces WB picker — computes exposure/WB from the image) ----
+
+/// `GET /auto-adjust` — suggested exposure/temperature/tint/etc from the
+/// current image's histogram. Apply the ones you want via `/adjust`.
+async fn auto_adjust(State(shared): State<Arc<AgentServerState>>) -> Response {
+    let app_state = shared.app_state();
+    json_result(crate::image_processing::calculate_auto_adjustments_core(&app_state))
+}
+
+// ---- lens lookup ----
+
+/// `GET /lens/makers` — list lens makers from the Lensfun database.
+async fn lens_makers(State(shared): State<Arc<AgentServerState>>) -> Response {
+    let app_state = shared.app_state();
+    json_result(
+        crate::lens_correction::lensfun_makers(&app_state).map(|m| json!({ "makers": m })),
+    )
+}
+
+#[derive(Deserialize)]
+struct LensAutodetectRequest {
+    maker: String,
+    model: String,
+}
+
+/// `POST /lens/autodetect {maker, model}` — best Lensfun lens match.
+async fn lens_autodetect(
+    State(shared): State<Arc<AgentServerState>>,
+    axum::Json(req): axum::Json<LensAutodetectRequest>,
+) -> Response {
+    let app_state = shared.app_state();
+    json_result(
+        crate::lens_correction::autodetect_lens_core(&app_state, &req.maker, &req.model)
+            .map(|m| json!({ "match": m })),
+    )
+}
+
+// ---- luts ----
+
+/// `GET /luts` — list installed LUTs.
+async fn luts_list(State(shared): State<Arc<AgentServerState>>) -> Response {
+    json_result(
+        crate::lut_processing::list_luts(shared.app_handle.clone()).map(|l| json!({ "luts": l })),
+    )
+}
+
+// ---- presets ----
+
+/// `GET /presets` — list saved user presets.
+async fn presets_list(State(shared): State<Arc<AgentServerState>>) -> Response {
+    json_result(
+        crate::file_management::load_presets(shared.app_handle.clone())
+            .map(|p| json!({ "presets": p })),
+    )
+}
+
+
 
 /// Pack and send a `PreviewJob` to the worker, awaiting the rendered bytes.
 ///

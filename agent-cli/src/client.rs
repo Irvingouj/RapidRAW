@@ -304,6 +304,111 @@ impl Client {
     pub async fn mask_remove(&self, id: &str) -> Result<OkResponse> {
         self.delete::<OkResponse>(&format!("/mask/{id}")).await
     }
+
+    // ---- pipeline tools / lookups (free-form JSON responses) ----
+
+    pub async fn denoise(&self, path: &str, intensity: f32, method: &str) -> Result<serde_json::Value> {
+        self.post_json(
+            "/denoise",
+            &serde_json::json!({ "path": path, "intensity": intensity, "method": method }),
+        )
+        .await
+    }
+
+    pub async fn hdr_merge(&self, paths: &[String]) -> Result<serde_json::Value> {
+        self.post_json("/hdr/merge", &serde_json::json!({ "paths": paths })).await
+    }
+
+    pub async fn panorama_stitch(&self, paths: &[String]) -> Result<serde_json::Value> {
+        self.post_json("/panorama/stitch", &serde_json::json!({ "paths": paths })).await
+    }
+
+    pub async fn negative_convert(
+        &self,
+        paths: &[String],
+        red_weight: f32,
+        green_weight: f32,
+        blue_weight: f32,
+        exposure: f32,
+        contrast: f32,
+    ) -> Result<serde_json::Value> {
+        self.post_json(
+            "/negative/convert",
+            &serde_json::json!({
+                "paths": paths,
+                "redWeight": red_weight,
+                "greenWeight": green_weight,
+                "blueWeight": blue_weight,
+                "exposure": exposure,
+                "contrast": contrast,
+            }),
+        )
+        .await
+    }
+
+    pub async fn cull(
+        &self,
+        paths: &[String],
+        similarity_threshold: u32,
+        blur_threshold: f64,
+        group_similar: bool,
+        filter_blurry: bool,
+    ) -> Result<serde_json::Value> {
+        self.post_json(
+            "/cull",
+            &serde_json::json!({
+                "paths": paths,
+                "similarityThreshold": similarity_threshold,
+                "blurThreshold": blur_threshold,
+                "groupSimilar": group_similar,
+                "filterBlurry": filter_blurry,
+            }),
+        )
+        .await
+    }
+
+    pub async fn inpaint(
+        &self,
+        path: &str,
+        patch_definition: serde_json::Value,
+        current_adjustments: serde_json::Value,
+        use_fast_inpaint: bool,
+    ) -> Result<serde_json::Value> {
+        self.post_json(
+            "/inpaint",
+            &serde_json::json!({
+                "path": path,
+                "patch_definition": patch_definition,
+                "current_adjustments": current_adjustments,
+                "use_fast_inpaint": use_fast_inpaint,
+            }),
+        )
+        .await
+    }
+
+    pub async fn auto_adjust(&self) -> Result<serde_json::Value> {
+        self.get("/auto-adjust").await
+    }
+
+    pub async fn lens_makers(&self) -> Result<serde_json::Value> {
+        self.get("/lens/makers").await
+    }
+
+    pub async fn lens_autodetect(&self, maker: &str, model: &str) -> Result<serde_json::Value> {
+        self.post_json(
+            "/lens/autodetect",
+            &serde_json::json!({ "maker": maker, "model": model }),
+        )
+        .await
+    }
+
+    pub async fn luts(&self) -> Result<serde_json::Value> {
+        self.get("/luts").await
+    }
+
+    pub async fn presets(&self) -> Result<serde_json::Value> {
+        self.get("/presets").await
+    }
 }
 
 #[cfg(test)]

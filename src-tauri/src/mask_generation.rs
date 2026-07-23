@@ -1445,7 +1445,7 @@ pub fn generate_mask_overlay(
 }
 
 pub fn resolve_warped_image_for_masks(
-    state: &tauri::State<AppState>,
+    state: &AppState,
     adjustments: &serde_json::Value,
     masks: &[MaskDefinition],
 ) -> Option<Arc<DynamicImage>> {

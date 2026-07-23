@@ -602,6 +602,11 @@ pub fn load_lensfun_db(app_handle: &tauri::AppHandle) -> LensDatabase {
 
 #[tauri::command]
 pub fn get_lensfun_makers(state: State<AppState>) -> Result<Vec<String>, String> {
+    lensfun_makers(&state)
+}
+
+/// Plain variant for the agent control server (no `tauri::State`).
+pub fn lensfun_makers(state: &AppState) -> Result<Vec<String>, String> {
     let db_guard = state
         .lens_db
         .lock()
@@ -728,12 +733,21 @@ pub fn autodetect_lens(
     model: String,
     state: tauri::State<AppState>,
 ) -> Result<Option<(String, String)>, String> {
+    autodetect_lens_core(&state, &maker, &model)
+}
+
+/// Plain variant for the agent control server.
+pub fn autodetect_lens_core(
+    state: &AppState,
+    maker: &str,
+    model: &str,
+) -> Result<Option<(String, String)>, String> {
     let db_guard = state
         .lens_db
         .lock()
         .map_err(|e| format!("Lock poisoned: {}", e))?;
     if let Some(db) = &*db_guard {
-        Ok(find_best_lens_match(db, &maker, &model))
+        Ok(find_best_lens_match(db, maker, model))
     } else {
         Ok(None)
     }

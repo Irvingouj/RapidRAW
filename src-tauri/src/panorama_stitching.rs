@@ -58,6 +58,15 @@ pub async fn stitch_panorama(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    stitch_panorama_core(paths, app_handle, &state).await
+}
+
+/// Plain variant for the agent control server.
+pub async fn stitch_panorama_core(
+    paths: Vec<String>,
+    app_handle: tauri::AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
     if paths.len() < 2 {
         return Err("Please select at least two images to stitch.".to_string());
     }
@@ -125,6 +134,14 @@ pub async fn stitch_panorama(
 pub async fn save_panorama(
     first_path_str: String,
     state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    save_panorama_core(first_path_str, &state).await
+}
+
+/// Plain variant for the agent control server.
+pub async fn save_panorama_core(
+    first_path_str: String,
+    state: &AppState,
 ) -> Result<String, String> {
     let panorama_image = state
         .panorama_result

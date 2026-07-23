@@ -99,6 +99,95 @@ enum Command {
     /// Mask operations: add / update / remove / list.
     #[command(subcommand)]
     Mask(MaskCmd),
+
+    /// AI/BM3D denoise (writes *_Denoised.tiff/png next to the source).
+    Denoise {
+        path: String,
+        #[arg(long, default_value_t = 0.5)]
+        intensity: f32,
+        /// "ai" or "bm3d".
+        #[arg(long, default_value = "ai")]
+        method: String,
+    },
+
+    /// Merge bracketed exposures into an HDR image.
+    Hdr {
+        /// Input paths (2+).
+        paths: Vec<String>,
+    },
+
+    /// Stitch overlapping images into a panorama.
+    Panorama {
+        /// Input paths (2+).
+        paths: Vec<String>,
+    },
+
+    /// Invert film-scan negatives.
+    Negative {
+        /// Input paths.
+        paths: Vec<String>,
+        #[arg(long, default_value_t = 1.0)]
+        red_weight: f32,
+        #[arg(long, default_value_t = 1.0)]
+        green_weight: f32,
+        #[arg(long, default_value_t = 1.0)]
+        blue_weight: f32,
+        #[arg(long, default_value_t = 0.0)]
+        exposure: f32,
+        #[arg(long, default_value_t = 1.0)]
+        contrast: f32,
+    },
+
+    /// Analyze a batch for blurry / similar images (culling suggestions).
+    Cull {
+        paths: Vec<String>,
+        #[arg(long, default_value_t = 5)]
+        similarity_threshold: u32,
+        #[arg(long, default_value_t = 10.0)]
+        blur_threshold: f64,
+        #[arg(long, default_value_t = true)]
+        group_similar: bool,
+        #[arg(long, default_value_t = true)]
+        filter_blurry: bool,
+    },
+
+    /// Generative fill / inpaint a masked region (needs AI connector or LAMA).
+    Inpaint {
+        path: String,
+        /// Patch definition JSON (AiPatchDefinition).
+        #[arg(long, value_name = "JSON")]
+        patch: String,
+        /// Current adjustments JSON (optional).
+        #[arg(long, value_name = "JSON")]
+        adjustments: Option<String>,
+        /// Prefer the local fast LAMA model.
+        #[arg(long)]
+        fast: bool,
+    },
+
+    /// Suggest exposure/WB/etc from the current image histogram.
+    AutoAdjust,
+
+    /// Lensfun lookups.
+    #[command(subcommand)]
+    Lens(LensCmd),
+
+    /// List installed LUTs.
+    Luts,
+
+    /// List saved user presets.
+    Presets,
+}
+
+#[derive(Subcommand)]
+enum LensCmd {
+    /// List lens makers in the Lensfun database.
+    Makers,
+    /// Autodetect the best lens match for EXIF maker/model.
+    Autodetect {
+        maker: String,
+        model: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -277,6 +366,125 @@ async fn main() -> Result<()> {
                 }
             }
         },
+
+        Command::Denoise { path, intensity, method } => {
+            let c = Client::discover().await?;
+            let r = c.denoise(&path, intensity, &method).await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
+        }
+
+        Command::Hdr { paths } => {
+            let c = Client::discover().await?;
+            let r = c.hdr_merge(&paths).await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
+        }
+
+        Command::Panorama { paths } => {
+            let c = Client::discover().await?;
+            let r = c.panorama_stitch(&paths).await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
+        }
+
+        Command::Negative {
+            paths,
+            red_weight,
+            green_weight,
+            blue_weight,
+            exposure,
+            contrast,
+        } => {
+            let c = Client::discover().await?;
+            let r = c
+                .negative_convert(
+                    &paths,
+                    red_weight,
+                    green_weight,
+                    blue_weight,
+                    exposure,
+                    contrast,
+                )
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
+        }
+
+        Command::Cull {
+            paths,
+            similarity_threshold,
+            blur_threshold,
+            group_similar,
+            filter_blurry,
+        } => {
+            let c = Client::discover().await?;
+            let r = c
+                .cull(
+                    &paths,
+                    similarity_threshold,
+                    blur_threshold,
+                    group_similar,
+                    filter_blurry,
+                )
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
+        }
+
+        Command::Inpaint {
+            path,
+            patch,
+            adjustments,
+            fast,
+        } => {
+            let c = Client::discover().await?;
+            let patch_def: serde_json::Value =
+                serde_json::from_str(&patch).context("invalid --patch JSON")?;
+            let adj: serde_json::Value = match adjustments {
+                Some(s) => serde_json::from_str(&s).context("invalid --adjustments JSON")?,
+                None => serde_json::json!({}),
+            };
+            let r = c.inpaint(&path, patch_def, adj, fast).await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
+        }
+
+        Command::AutoAdjust => {
+            let c = Client::discover().await?;
+            let r = c.auto_adjust().await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
+        }
+
+        Command::Lens(cmd) => match cmd {
+            LensCmd::Makers => {
+                let c = Client::discover().await?;
+                let r = c.lens_makers().await?;
+                println!("{}", serde_json::to_string_pretty(&r)?);
+                Ok(())
+            }
+            LensCmd::Autodetect { maker, model } => {
+                let c = Client::discover().await?;
+                let r = c.lens_autodetect(&maker, &model).await?;
+                println!("{}", serde_json::to_string_pretty(&r)?);
+                Ok(())
+            }
+        },
+
+        Command::Luts => {
+            let c = Client::discover().await?;
+            let r = c.luts().await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
+        }
+
+        Command::Presets => {
+            let c = Client::discover().await?;
+            let r = c.presets().await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
+        }
     }
 }
 

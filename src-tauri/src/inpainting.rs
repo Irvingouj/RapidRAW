@@ -327,6 +327,28 @@ pub async fn invoke_generative_replace_with_mask_def(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
+    invoke_generative_replace_with_mask_def_core(
+        path,
+        patch_definition,
+        current_adjustments,
+        use_fast_inpaint,
+        token,
+        app_handle,
+        &state,
+    )
+    .await
+}
+
+/// Plain variant for the agent control server.
+pub async fn invoke_generative_replace_with_mask_def_core(
+    path: String,
+    patch_definition: AiPatchDefinition,
+    current_adjustments: Value,
+    use_fast_inpaint: bool,
+    token: Option<String>,
+    app_handle: tauri::AppHandle,
+    state: &AppState,
+) -> Result<String, String> {
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
 
     let mut source_image_adjustments = current_adjustments.clone();

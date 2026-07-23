@@ -241,7 +241,7 @@ fn cancel_thumbnail_generation(
 }
 
 pub fn get_cached_full_warped_image(
-    state: &tauri::State<AppState>,
+    state: &AppState,
     js_adjustments: &serde_json::Value,
 ) -> Result<Arc<DynamicImage>, String> {
     let geo_hash = calculate_geometry_hash(js_adjustments);
@@ -1101,7 +1101,7 @@ async fn preview_geometry_transform(
 }
 
 pub fn get_original_image(
-    state: &tauri::State<AppState>,
+    state: &AppState,
 ) -> Result<(std::sync::Arc<image::DynamicImage>, bool), String> {
     let original_image_lock = state.original_image.lock().unwrap();
     let loaded_image = original_image_lock
@@ -1404,6 +1404,15 @@ async fn merge_hdr(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    merge_hdr_core(paths, app_handle, &state).await
+}
+
+/// Plain variant for the agent control server.
+pub async fn merge_hdr_core(
+    paths: Vec<String>,
+    app_handle: tauri::AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
     if paths.len() < 2 {
         return Err("Please select at least two images to merge.".to_string());
     }
@@ -1456,6 +1465,11 @@ async fn save_hdr(
     first_path_str: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
+    save_hdr_core(first_path_str, &state).await
+}
+
+/// Plain variant for the agent control server.
+pub async fn save_hdr_core(first_path_str: String, state: &AppState) -> Result<String, String> {
     let hdr_image = state.hdr_result.lock().unwrap().take().ok_or_else(|| {
         "No hdr image found in memory to save. It might have already been saved.".to_string()
     })?;

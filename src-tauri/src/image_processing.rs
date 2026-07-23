@@ -3415,6 +3415,13 @@ pub fn auto_results_to_json(results: &AutoAdjustmentResults) -> serde_json::Valu
 pub fn calculate_auto_adjustments(
     state: tauri::State<AppState>,
 ) -> Result<serde_json::Value, String> {
+    calculate_auto_adjustments_core(&state)
+}
+
+/// Plain variant for the agent control server.
+pub fn calculate_auto_adjustments_core(
+    state: &AppState,
+) -> Result<serde_json::Value, String> {
     let original_image = state
         .original_image
         .lock()

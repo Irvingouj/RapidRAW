@@ -95,6 +95,17 @@ pub async fn batch_denoise_images(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
+    batch_denoise_images_core(paths, intensity, method, app_handle, &state).await
+}
+
+/// Plain variant for the agent control server.
+pub async fn batch_denoise_images_core(
+    paths: Vec<String>,
+    intensity: f32,
+    method: String,
+    app_handle: tauri::AppHandle,
+    state: &AppState,
+) -> Result<Vec<String>, String> {
     let mut ai_session = None;
     if method == "ai" {
         let session = crate::ai_processing::get_or_init_denoise_model(
