@@ -260,38 +260,42 @@ async fn load(
 }
 
 /// `POST /preview` body.
-#[derive(Deserialize)]
+///
+/// Preview **always** renders the current committed edit state (mirror).
+/// There is no what-if patch: to try a change, `POST /adjust` then preview again.
+#[derive(Deserialize, Default)]
 struct PreviewRequest {
-    adjustments: serde_json::Value,
     #[serde(default)]
     target_resolution: Option<u32>,
-    /// Region of interest, normalized `(x, y, w, h)` in 0..1. Constrains the
-    /// rendered region but does NOT prepend an interactive header (we always
-    /// return clean JPEG bytes for agent consumption).
+    /// Region of interest, normalized `(x, y, w, h)` in 0..1.
     #[serde(default)]
     roi: Option<(f32, f32, f32, f32)>,
 }
 
-/// `POST /preview {adjustments, target_resolution?, roi?}` → JPEG bytes.
+/// `POST /preview {target_resolution?, roi?}` → JPEG of the **current** look.
 ///
-/// **Silent exploration path.** Pushes a `PreviewJob` directly to the worker
-/// (just like `apply_adjustments`) and returns the rendered bytes. Does NOT
-/// touch the GUI or write a sidecar — ideal for the agent to iterate on many
-/// parameter values without flickering the human's window.
+/// Always uses the agent state mirror (same edits the GUI has after commits).
+/// Does not accept adjustments — set via `/adjust` / `/mask/*`, then preview.
+/// Silent: no GUI flicker beyond what's already committed, no extra sidecar write.
 ///
-/// Returns a clean JPEG (no header). Internally we set `is_interactive=false`
-/// because the interactive path prepends a 24-byte ROI/dimension header that
-/// only the GUI's interactive zoom renderer needs; agents want raw JPEG bytes.
-/// The optional `roi` still constrains the *rendered region* (normalized rect),
-/// it just doesn't get a header prepended.
+/// Clean JPEG (no interactive ROI header).
 async fn preview(
     State(shared): State<Arc<AgentServerState>>,
     axum::Json(req): axum::Json<PreviewRequest>,
 ) -> Response {
+    let Some(adjustments) = shared.mirror() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "error": "no current adjustments in mirror — load an image and/or adjust first so the GUI syncs state"
+            })),
+        )
+            .into_response();
+    };
     let app_state = shared.app_state();
     match enqueue_preview(
         &app_state,
-        req.adjustments,
+        adjustments,
         /* is_interactive = */ false,
         req.target_resolution,
         req.roi,
@@ -400,13 +404,10 @@ pub struct AgentStateMirror(pub StdMutex<Option<Value>>);
 // Mask routes
 // ----------------------------------------------------------------------------
 
-/// `POST /export` body.
-#[derive(Deserialize)]
+/// `POST /export` body. Always exports the **current** committed edit state.
+#[derive(Deserialize, Default)]
 struct ExportRequest {
-    adjustments: serde_json::Value,
-    /// Optional output resolution cap. Omit for the backend's full preview
-    /// resolution (typically 1920 on the long edge). For pixel-exact full-res
-    /// export, use the GUI's export panel — this route reuses the preview path.
+    /// Optional output resolution cap (preview pipeline long edge).
     #[serde(default)]
     target_resolution: Option<u32>,
     /// If set, write the JPEG to this path (created/overwritten) in addition to
@@ -415,21 +416,27 @@ struct ExportRequest {
     path: Option<String>,
 }
 
-/// `POST /export {adjustments, target_resolution?, path?}` → high-quality JPEG
-/// bytes (and optionally written to `path`).
+/// `POST /export {target_resolution?, path?}` → JPEG of the **current** look.
 ///
-/// This reuses the same render pipeline as `/preview` (offscreen encode) but is
-/// meant for committing a final result rather than iterating. For multi-image
-/// batch export with the full GUI export settings, use the app's export panel.
+/// Same contract as `/preview`: always current mirror state. To change the look,
+/// `/adjust` first, then export. For multi-format full-res GUI export, see issue #3.
 async fn export_image(
     State(shared): State<Arc<AgentServerState>>,
     axum::Json(req): axum::Json<ExportRequest>,
 ) -> Response {
+    let Some(adjustments) = shared.mirror() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "error": "no current adjustments in mirror — load an image and/or adjust first so the GUI syncs state"
+            })),
+        )
+            .into_response();
+    };
     let app_state = shared.app_state();
-    // Non-interactive → full-quality encode (no ROI header), matching /preview.
     match enqueue_preview(
         &app_state,
-        req.adjustments,
+        adjustments,
         /* is_interactive = */ false,
         req.target_resolution,
         /* roi = */ None,

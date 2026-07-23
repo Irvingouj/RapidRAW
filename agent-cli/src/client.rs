@@ -77,18 +77,17 @@ struct AdjustmentsBody {
     adjustments: AdjustmentsPatch,
 }
 
-#[derive(Serialize)]
+/// Preview/export never send adjustments — server always uses current state.
+#[derive(Serialize, Default)]
 struct PreviewBody {
-    adjustments: AdjustmentsPatch,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_resolution: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     roi: Option<(f32, f32, f32, f32)>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 struct ExportBody {
-    adjustments: AdjustmentsPatch,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_resolution: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -233,15 +232,19 @@ impl Client {
         self.post_json("/load", &LoadRequest { path, navigate }).await
     }
 
+    /// Render a JPEG of the **current** committed look (server-side mirror).
+    /// No what-if patch — call `adjust` first, then `preview` again.
     pub async fn preview(
         &self,
-        adjustments: AdjustmentsPatch,
         resolution: Option<u32>,
         roi: Option<(f32, f32, f32, f32)>,
     ) -> Result<Vec<u8>> {
         self.post_bytes(
             "/preview",
-            &PreviewBody { adjustments, target_resolution: resolution, roi },
+            &PreviewBody {
+                target_resolution: resolution,
+                roi,
+            },
         )
         .await
     }
@@ -259,16 +262,15 @@ impl Client {
         self.get::<serde_json::Value>("/schema").await
     }
 
+    /// Export a JPEG of the **current** committed look.
     pub async fn export(
         &self,
-        adjustments: AdjustmentsPatch,
         resolution: Option<u32>,
         out_path: Option<&str>,
     ) -> Result<Vec<u8>> {
         self.post_bytes(
             "/export",
             &ExportBody {
-                adjustments,
                 target_resolution: resolution,
                 path: out_path.map(String::from),
             },

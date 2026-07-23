@@ -55,14 +55,22 @@ def main() -> int:
     except Exception as e:
         fail(str(e)); failures += 1
 
-    # /preview — must be a clean, decodable JPEG, reasonably fast
-    print("→ POST /preview (exposure +0.5, res 512)")
+    # /adjust first so the mirror has a current look
+    print("→ POST /adjust {exposure: 0.7, temperature: 20}")
+    try:
+        r = c.adjust({"exposure": 0.7, "temperature": 20})
+        assert r.get("ok") is True, f"not ok: {r}"
+        ok(f"acknowledged, merged exposure={r.get('adjustments', {}).get('exposure')}")
+    except Exception as e:
+        fail(str(e)); failures += 1
+
+    # /preview — always current state (no adjustments body)
+    print("→ POST /preview (current look, res 512)")
     try:
         t0 = time.perf_counter()
-        jpeg = c.preview({"exposure": 0.5}, resolution=512)
+        jpeg = c.preview(resolution=512)
         dt_ms = (time.perf_counter() - t0) * 1000
 
-        # validate JPEG
         from PIL import Image
         img = Image.open(io.BytesIO(jpeg))
         img.load()
@@ -73,15 +81,6 @@ def main() -> int:
             fail(f"slow: {dt_ms:.0f}ms > 1500ms"); failures += 1
     except Exception as e:
         fail(f"preview invalid: {e}"); failures += 1
-
-    # /adjust — partial patch
-    print("→ POST /adjust {exposure: 0.7, temperature: 20}")
-    try:
-        r = c.adjust({"exposure": 0.7, "temperature": 20})
-        assert r.get("ok") is True, f"not ok: {r}"
-        ok(f"acknowledged, merged exposure={r.get('adjustments', {}).get('exposure')}")
-    except Exception as e:
-        fail(str(e)); failures += 1
 
     # /state — should reflect the merged adjustment
     print("→ GET /state")

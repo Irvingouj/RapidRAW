@@ -138,24 +138,23 @@ class RapidRAWClient:
 
     def preview(
         self,
-        adjustments: dict,
         resolution: Optional[int] = None,
         roi: Optional[tuple[float, float, float, float]] = None,
-        interactive: bool = True,
     ) -> bytes:
-        """Render-only preview (silent: no GUI update, no sidecar). Returns JPEG bytes."""
-        body: dict[str, Any] = {"adjustments": adjustments, "isInteractive": interactive}
+        """JPEG of the **current** committed look (server mirror). No what-if params.
+
+        To try a change: adjust(...) then preview() again.
+        """
+        body: dict[str, Any] = {}
         if resolution is not None:
             body["targetResolution"] = resolution
         if roi is not None:
             body["roi"] = list(roi)
         return self._request("POST", "/preview", json_body=body, expect="bytes")
 
-    def preview_to_file(
-        self, adjustments: dict, out_path: str, **kw
-    ) -> str:
-        """Convenience: render a preview and write it to `out_path`. Returns the path."""
-        jpeg = self.preview(adjustments, **kw)
+    def preview_to_file(self, out_path: str, **kw) -> str:
+        """Convenience: current-look preview written to `out_path`."""
+        jpeg = self.preview(**kw)
         Path(out_path).write_bytes(jpeg)
         return str(out_path)
 
@@ -196,18 +195,17 @@ class RapidRAWClient:
     def get_schema(self) -> dict:
         return self._request("GET", "/schema")
 
-    def export(self, out_path: Optional[str] = None, adjustments: Optional[dict] = None, resolution: Optional[int] = None, **kw) -> bytes:
-        """Render at full quality and return JPEG bytes; optionally write to out_path.
-
-        Reuses the preview render path (offscreen encode). For batch/multi-image
-        export with the full GUI export settings, use the app's export panel.
-        """
-        body: dict[str, Any] = {"adjustments": adjustments or {}}
+    def export(
+        self,
+        out_path: Optional[str] = None,
+        resolution: Optional[int] = None,
+    ) -> bytes:
+        """JPEG of the **current** committed look; optionally also write to out_path."""
+        body: dict[str, Any] = {}
         if out_path is not None:
             body["path"] = str(out_path)
         if resolution is not None:
             body["targetResolution"] = resolution
-        body.update(kw)
         return self._request("POST", "/export", json_body=body, expect="bytes")
 
 

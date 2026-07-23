@@ -37,20 +37,21 @@ def main(image_path: str, out_dir: str) -> None:
     info = client.load(image_path)
     print(f"  {info}")
 
-    # ---- silent exploration: sweep exposure, save each preview ----
-    print("→ iterating exposure via /preview (silent, no GUI flicker) …")
+    # ---- commit then see current look (preview never takes what-if params) ----
+    print("→ iterating exposure: adjust → preview (current look each step) …")
     for ev in [-1.0, -0.5, 0.0, 0.5, 1.0]:
+        client.adjust({"exposure": ev})
         t0 = time.perf_counter()
-        jpeg = client.preview({"exposure": ev}, resolution=1024)
+        jpeg = client.preview(resolution=1024)
         dt = (time.perf_counter() - t0) * 1000
         p = out / f"preview_ev{ev:+.1f}.jpg"
         p.write_bytes(jpeg)
         print(f"  ev={ev:+.1f}  {len(jpeg):>7} bytes  {dt:6.1f} ms  → {p.name}")
 
-    # ---- commit: drives the live GUI ----
-    print("→ committing exposure=+0.5 via /adjust (watch the GUI update live) …")
+    print("→ committing final look exposure=+0.5 …")
     res = client.adjust({"exposure": 0.5, "temperature": 15, "vibrance": 10})
     print(f"  {res}")
+    client.preview_to_file(str(out / "after_commit.jpg"), resolution=1024)
 
     # ---- add an AI sky mask ----
     print("→ adding ai-sky mask (exposure -1.0, saturation -30) …")
@@ -76,7 +77,7 @@ def main(image_path: str, out_dir: str) -> None:
     export_path = out / "export.jpg"
     print(f"→ exporting to {export_path} …")
     try:
-        data = client.export(out_path=str(export_path), quality=92)
+        data = client.export(out_path=str(export_path))
         export_path.write_bytes(data)
         print(f"  wrote {len(data)} bytes")
     except RapidRAWError as e:

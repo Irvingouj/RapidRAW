@@ -46,15 +46,9 @@ enum Command {
         no_navigate: bool,
     },
 
-    /// Render a preview JPEG (silent: no GUI update, no sidecar). Great for
-    /// iterating on values without flickering the window.
+    /// Render a JPEG of the **current** committed look (sliders + masks as live).
+    /// No adjustment flags — to change the look, `adjust` first, then `preview` again.
     Preview {
-        #[command(flatten)]
-        flags: AdjustmentsFlags,
-        /// Extra adjustments as a JSON object, merged on top of the flags.
-        /// e.g. --json '{"hsl":{"reds":{"saturation":20}}}'
-        #[arg(long, value_name = "JSON")]
-        json: Option<String>,
         /// Max output resolution (long edge).
         #[arg(long)]
         resolution: Option<u32>,
@@ -83,15 +77,12 @@ enum Command {
     /// Print the slider/mask schema the agent can use.
     Schema,
 
-    /// Export a full-quality JPEG for the given (or current) adjustments.
+    /// Export a JPEG of the **current** committed look (same as preview, for a file).
+    /// No adjustment flags — `adjust` first if you want a different look.
     Export {
-        #[command(flatten)]
-        flags: AdjustmentsFlags,
-        #[arg(long, value_name = "JSON")]
-        json: Option<String>,
         #[arg(long)]
         resolution: Option<u32>,
-        /// Output file path. Required (the CLI doesn't write image bytes to stdout).
+        /// Output file path.
         #[arg(short, long)]
         out: String,
     },
@@ -267,10 +258,9 @@ async fn main() -> Result<()> {
             Ok(())
         }
 
-        Command::Preview { flags, json, resolution, out } => {
+        Command::Preview { resolution, out } => {
             let c = Client::discover().await?;
-            let patch = build_patch(flags, json)?;
-            let bytes = c.preview(patch, resolution, None).await?;
+            let bytes = c.preview(resolution, None).await?;
             write_bytes(&bytes, out.as_deref())?;
             Ok(())
         }
@@ -304,10 +294,9 @@ async fn main() -> Result<()> {
             Ok(())
         }
 
-        Command::Export { flags, json, resolution, out } => {
+        Command::Export { resolution, out } => {
             let c = Client::discover().await?;
-            let patch = build_patch(flags, json)?;
-            let bytes = c.export(patch, resolution, Some(&out)).await?;
+            let bytes = c.export(resolution, Some(&out)).await?;
             eprintln!("wrote {} bytes to {out}", bytes.len());
             Ok(())
         }
