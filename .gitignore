@@ -46,3 +46,6 @@ bench/out/
 *.rrdata
 *.pyc
 __pycache__/
+
+# agent-cli build artifacts
+/agent-cli/target/
